@@ -34,6 +34,12 @@ safety checks ──► capture the pane ──► SIGTERM ──► screen file
 (refused: nothing touched)          (no exit in 5 s: stop, pane untouched)
 ```
 
+| The session | What a close does |
+|---|---|
+| in a tmux pane | the steps above: its screen stays, `claude --resume` typed |
+| attached to no terminal (non-interactive, background) | a plain SIGTERM after the same safety checks: there is no screen to keep (the user, 2026-11-19) |
+| in a terminal outside tmux | refused: SIGTERM would wipe its screen, and nothing can be typed back into it |
+
 **Scheduler: none yet.** When `idle` should run (every hour? at night? which N?) is not decided; for now it runs by hand.
 
 ## Folder map

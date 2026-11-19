@@ -216,8 +216,10 @@ def ancestors(pid: int, d_parent: Dict[int, int]) -> List[int]:
     return l_chain
 
 
-def check_closeable(s: Dict[str, Any]) -> str:
-    """Every safety check, cheapest first, before anything is captured or signalled; returns the %pane.
+def check_closeable(s: Dict[str, Any]) -> Optional[str]:
+    """Every safety check, cheapest first, before anything is captured or signalled; returns the %pane, or None for
+    a session attached to no terminal (non-interactive, background): that one only gets a plain SIGTERM, there is no
+    screen to keep (the user, 2026-11-19). A session in a terminal outside tmux is refused: SIGTERM would wipe its screen.
     The first six are asm close's; the pid start time and the pane-holds-pid checks are new: they stop
     a stale sessions/<pid>.json from sending SIGTERM or keys to a process or pane that is not its own."""
     pid, uuid = s.get("pid"), s["sessionId"]
@@ -226,11 +228,9 @@ def check_closeable(s: Dict[str, Any]) -> str:
         raise Refused("refusing to close the Claude session this command is running from.")
     if s.get("status") == "busy":
         raise Refused("the Claude session is busy (mid-task): never close a busy Claude session.")
-    if s.get("kind") != "interactive":
-        raise Refused(f"the Claude session's kind is '{s.get('kind')}', not 'interactive': not handled.")
-    pane_id = pane_id_of(s)
-    if not pane_id:
-        raise Refused("the Claude session has no tmux pane (not run in tmux): not handled.")
+    pane_id = pane_id_of(s) if s.get("kind") == "interactive" else None
+    if not pane_id and tty_of(pid):
+        raise Refused(f"the Claude session has a terminal ({tty_of(pid)}) but no tmux pane to keep its screen in: not handled.")
     try:
         os.kill(pid, 0)
     except (ProcessLookupError, TypeError, OverflowError):
@@ -243,6 +243,8 @@ def check_closeable(s: Dict[str, Any]) -> str:
                                 env={**os.environ, "TZ": "UTC", "LC_ALL": "C"}).stdout
         if " ".join(lstart.split()) != " ".join(proc_start.split()):
             raise Refused(f"pid {pid} started at '{lstart.strip()}', not '{proc_start}': the pid was reused, stale sessions/{pid}.json.")
+    if not pane_id:
+        return None
     out = subprocess.run(["tmux", "list-panes", "-a", "-F", "#{pane_id} #{pane_pid}"], capture_output=True, text=True).stdout
     d_pane_pid = {a: int(b) for a, b in (l.split() for l in out.splitlines() if len(l.split()) == 2)}
     if pane_id not in d_pane_pid:
@@ -259,6 +261,12 @@ def rss_mb(pid: int) -> Optional[int]:
     return int(out) // 1024 if out.isdigit() else None
 
 
+def tty_of(pid: Any) -> str:
+    """The process's terminal (ttys003, pts/2), or '' when it has none (ps prints ?? on macOS, ? on Linux)."""
+    out = subprocess.run(["ps", "-o", "tty=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    return "" if out in ("", "?", "??") else out
+
+
 def terminate(pid: int) -> None:
     """SIGTERM and wait for the process to go; never SIGKILL (asm's _terminate)."""
     os.kill(pid, signal.SIGTERM)
@@ -273,8 +281,9 @@ def terminate(pid: int) -> None:
                       f"check it by hand before retrying (it may be flushing a large transcript).")
 
 
-def close(s: Dict[str, Any], by: str) -> str:
-    """Close one running Claude session; returns the screen file. Raises Refused or CloseFailed."""
+def close(s: Dict[str, Any], by: str) -> Optional[str]:
+    """Close one running Claude session; returns the screen file (None for a session with no terminal: plain SIGTERM).
+    Raises Refused or CloseFailed."""
     pid, uuid = s.get("pid"), s["sessionId"]
     name = s.get("name") or uuid
     try:
@@ -285,6 +294,17 @@ def close(s: Dict[str, Any], by: str) -> str:
     idle_s = time.time() - (parse_ts(s.get("statusUpdatedAt")) or time.time())
     mem = rss_mb(pid)
     print(f"  status={s.get('status')}  idle={human_age(idle_s)}  mem={mem}MB  pane={pane_id}  cwd={s.get('cwd')}", flush=True)
+
+    if pane_id is None:                # no terminal: nothing to keep on screen, a plain SIGTERM
+        try:
+            terminate(pid)
+        except CloseFailed as e:
+            log({"event": "close_failed", "by": by, "uuid": uuid, "name": name, "pid": pid, "pane": None, "reason": str(e)})
+            raise
+        log({"event": "close", "by": by, "uuid": uuid, "name": name, "pid": pid, "pane": None, "kind": s.get("kind"),
+             "idle_minutes": int(idle_s // 60), "last_prompt_ts": s.get("_last_prompt_ts"), "mem_mb_freed": mem, "screen_file": None})
+        print(f"  closed (no terminal: plain SIGTERM): {mem}MB freed. Resume: claude --resume {uuid}", flush=True)
+        return None
 
     # Capture BEFORE terminating: the conversation lives on the terminal's alternate screen,
     # which is torn down the moment the process exits.
@@ -352,7 +372,8 @@ def cmd_idle(over_h: float, dry_run: bool) -> int:
               f"  pid {s.get('pid')}  {s.get('name')}  {s.get('cwd')}", flush=True)
         try:
             if dry_run:
-                print(f"  would close (pane {check_closeable(s)})")
+                pane = check_closeable(s)
+                print(f"  would close (pane {pane})" if pane else "  would close (no terminal: plain SIGTERM)")
             else:
                 close(s, by=f"idle --over {over_h:g}")
         except Refused as e:

@@ -5,7 +5,7 @@
 ## Rules
 
 - **Never send a signal or keys to anything a test did not start.** Tests run only in the sandbox of `tests/run_tests.sh`: `HOME`, `CLAUDE_CONFIG_DIR`, `CLAUDE_CLOSE_KEEP_SCREEN_HOME`, `TMUX_TMPDIR` inside `mktemp -d`, with `TMUX` unset (else tmux talks to the user's default server). Never run `install.sh` / `uninstall.sh` with the real `HOME` unless the user asks.
-- **Every safety check runs before anything is captured or signalled** (`check_closeable` in `src/claude-close-keep-screen`): not self (`CLAUDE_CODE_SESSION_ID`, or the Claude process is an ancestor of this command), not busy, kind `interactive`, in tmux, pid alive, pid start time = the sessions file's `procStart`, the pane exists and holds the pid. A new check goes there, never after the capture.
+- **Every safety check runs before anything is captured or signalled** (`check_closeable` in `src/claude-close-keep-screen`): not self (`CLAUDE_CODE_SESSION_ID`, or the Claude process is an ancestor of this command), not busy, in tmux with kind `interactive` (or else attached to no terminal at all: plain SIGTERM, no capture), pid alive, pid start time = the sessions file's `procStart`, the pane exists and holds the pid. A new check goes there, never after the capture.
 - **SIGTERM only, never SIGKILL**: Claude Code flushes its transcript on SIGTERM. If it has not exited after 5 s, leave the pane untouched and exit 1.
 - **The pid, status and kind come only from `$CLAUDE_CONFIG_DIR/sessions/<pid>.json`.** `agent-tracker now --json` (when on the PATH) only adds the last prompt, the pane and the transcript path.
 - **No scheduler**: when `idle` runs is not decided (the user, 2026-11-07). Do not add a trigger without the user; when one is added, follow skill `jobs-and-services`.

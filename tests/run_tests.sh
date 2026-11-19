@@ -155,16 +155,18 @@ check "self (run from inside the Claude session's process tree): refused" has "$
 check "self (process tree): still running" alive "$P_ANC"
 
 U_NOTMUX=$(uuid_of 70)
-( cd "$S" && exec python3 "$FAKE" --uuid "$U_NOTMUX" --status idle --term-file "$TERM_LOG" > /dev/null ) &
+# no terminal at all (a background, non-interactive session): a plain SIGTERM, no screen to keep (the user, 2026-11-19)
+( cd "$S" && exec python3 "$FAKE" --uuid "$U_NOTMUX" --status idle --term-file "$S/term_notty.log" > /dev/null < /dev/null ) &
 L_STARTED+=("$!"); P_NOTMUX=$!; wait_for_session "$U_NOTMUX"
 run "$O" close "$U_NOTMUX"
-check "not in tmux: refused" test $RC -eq 1
-check "not in tmux: says so" has "$O" "no tmux pane"
-check "not in tmux: still running" alive "$P_NOTMUX"
+check "no terminal: closed" test $RC -eq 0
+check "no terminal: says plain SIGTERM" has "$O" "plain SIGTERM"
+check "no terminal: got SIGTERM and exited" bash -c "test -s '$S/term_notty.log' && ! kill -0 $P_NOTMUX 2>/dev/null"
+check "no terminal: no screen file" test ! -e "$HOME/opt/claude-close-keep-screen/data/close-screens/$U_NOTMUX.txt"
 
 U_KIND=$(uuid_of 6d); start_fake "$U_KIND" idle --kind sdk ; P_KIND=$(pid_of "$U_KIND")
 run "$O" close "$U_KIND"
-check "kind not interactive: refused" has "$O" "not 'interactive'"
+check "a terminal but not an interactive tmux session: refused" has "$O" "no tmux pane to keep its screen in"
 
 # a sessions file whose pid has exited
 ( exit 0 ) & P_GONE=$!; wait "$P_GONE"
@@ -198,7 +200,7 @@ check "ambiguous uuid prefix: refused" has "$O" "several running Claude sessions
 check "ambiguous uuid prefix: both still running" alive "$(pid_of "$U_AMB1")"
 
 check "refusals: no SIGTERM was sent" test ! -s "$TERM_LOG"
-check "refusals: logged" test "$(grep -c '"event": "refused"' "$HOME/opt/claude-close-keep-screen/logs/close.jsonl")" -eq 9
+check "refusals: logged" test "$(grep -c '"event": "refused"' "$HOME/opt/claude-close-keep-screen/logs/close.jsonl")" -eq 8
 
 # -- 4. the close itself ---------------------------------------------------------------
 verify_closed() {   # verify_closed <label> <uuid> <pid> <pane>
