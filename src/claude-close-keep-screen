@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""agent-auto-close - close a running Claude session, leaving it resumable in its tmux pane.
+"""claude-close-keep-screen - close a running Claude session, leaving it resumable in its tmux pane.
 
-  agent-auto-close close <uuid | uuid prefix | %pane>   close one Claude session by hand
-  agent-auto-close idle --over <hours> [--dry-run]       close the Claude sessions idle for longer than <hours>
+  claude-close-keep-screen close <uuid | uuid prefix | %pane>   close one Claude session by hand
+  claude-close-keep-screen idle --over <hours> [--dry-run]       close the Claude sessions idle for longer than <hours>
 
 A close: capture the tmux pane's screen, SIGTERM the Claude process (never SIGKILL: Claude Code
 flushes its transcript on SIGTERM), write the screen file, cat it back into the pane and pre-type
@@ -13,7 +13,7 @@ really holding the pid).
 Reads:  $CLAUDE_CONFIG_DIR/sessions/<pid>.json (Claude Code's own file per running Claude session),
         $CLAUDE_CONFIG_DIR/projects/*/<uuid>.jsonl (transcripts, for the last prompt),
         `agent-tracker now --json` when it is on the PATH (last prompt, pane, transcript).
-Writes: $AGENT_AUTO_CLOSE_HOME/data/close-screens/<uuid>.txt, $AGENT_AUTO_CLOSE_HOME/logs/close.jsonl
+Writes: $CLAUDE_CLOSE_KEEP_SCREEN_HOME/data/close-screens/<uuid>.txt, $CLAUDE_CLOSE_KEEP_SCREEN_HOME/logs/close.jsonl
 """
 
 import argparse
@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 VERSION = "1.0"
-APP_HOME = os.environ.get("AGENT_AUTO_CLOSE_HOME") or os.path.expanduser("~/opt/agent-auto-close")
+APP_HOME = os.environ.get("CLAUDE_CLOSE_KEEP_SCREEN_HOME") or os.path.expanduser("~/opt/claude-close-keep-screen")
 CLAUDE_DIR = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
 SCREENS_DIR = os.path.join(APP_HOME, "data", "close-screens")
 LOG_PATH = os.path.join(APP_HOME, "logs", "close.jsonl")
@@ -364,9 +364,9 @@ def cmd_idle(over_h: float, dry_run: bool) -> int:
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(prog="agent-auto-close", description=__doc__.split("\n\n")[0],
+    p = argparse.ArgumentParser(prog="claude-close-keep-screen", description=__doc__.split("\n\n")[0],
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--version", action="version", version=f"agent-auto-close {VERSION}")
+    p.add_argument("--version", action="version", version=f"claude-close-keep-screen {VERSION}")
     sub = p.add_subparsers(dest="command", required=True)
     pc = sub.add_parser("close", help="close one running Claude session (by uuid, uuid prefix or %%pane)")
     pc.add_argument("target", help="the Claude session's uuid, a unique uuid prefix, or its tmux %%pane")

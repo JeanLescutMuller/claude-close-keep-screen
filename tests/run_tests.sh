@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# tests/run_tests.sh - agent-auto-close's tests, in a sandbox only.
+# tests/run_tests.sh - claude-close-keep-screen's tests, in a sandbox only.
 #
-# Sandbox: S=$(mktemp -d); HOME, CLAUDE_CONFIG_DIR, AGENT_AUTO_CLOSE_HOME and TMUX_TMPDIR all point inside it,
+# Sandbox: S=$(mktemp -d); HOME, CLAUDE_CONFIG_DIR, CLAUDE_CLOSE_KEEP_SCREEN_HOME and TMUX_TMPDIR all point inside it,
 # so tmux is a separate server (never the user's default one) and install.sh writes only under $S/home.
 # Fake Claude sessions = tests/fake_claude.py, started by this script in panes of the sandbox tmux server;
 # only processes this script started are ever signalled.
@@ -18,7 +18,7 @@ PY_DIR=$(dirname "$(command -v python3)")
 TMUX_DIR=$(dirname "$(command -v tmux)")
 
 # -- The sandbox: every path the tool or tmux uses is under $S ----------------
-unset TMUX TMUX_PANE CLAUDE_CODE_SESSION_ID AGENT_AUTO_CLOSE_HOME
+unset TMUX TMUX_PANE CLAUDE_CODE_SESSION_ID CLAUDE_CLOSE_KEEP_SCREEN_HOME
 export SANDBOX="$S" HOME="$S/home" CLAUDE_CONFIG_DIR="$S/home/.claude" TMUX_TMPDIR="$S/tmux" JR_MACHINE_NAME=test-machine
 export AGENT_TRACKER_HOME="$S/home/opt/agent-tracker" AGENT_RESUME_HOME="$S/home/opt/agent-resume"
 export PATH="$S/bin:$S/home/.local/bin:$PY_DIR:$TMUX_DIR:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -31,7 +31,7 @@ for v in HOME CLAUDE_CONFIG_DIR TMUX_TMPDIR; do
 done
 command -v agent-tracker >/dev/null && { echo "ABORT: an agent-tracker outside the sandbox is on the PATH" >&2; exit 2; }
 
-AAC="$HOME/.local/bin/agent-auto-close"
+AAC="$HOME/.local/bin/claude-close-keep-screen"
 TERM_LOG="$S/term.log"; touch "$TERM_LOG"
 PASS=0; FAIL=0
 L_STARTED=()          # pids of the fake Claude sessions and helpers this script started
@@ -100,10 +100,10 @@ with open(path, "w") as f:
 PY
 }
 
-run() {   # run <outfile> <args…>: agent-auto-close's exit code in $RC, its output in <outfile>
+run() {   # run <outfile> <args…>: claude-close-keep-screen's exit code in $RC, its output in <outfile>
     local out=$1; shift
     "$AAC" "$@" > "$out" 2>&1; RC=$?
-    { echo "--- agent-auto-close $* (exit $RC)"; cat "$out"; } >> "$LOG"
+    { echo "--- claude-close-keep-screen $* (exit $RC)"; cat "$out"; } >> "$LOG"
 }
 
 stop_fake() {   # SIGTERM one fake this script started, and wait for it
@@ -117,10 +117,10 @@ echo "sandbox: $S" > "$LOG"
 
 # -- 1. install.sh, only with HOME=<sandbox> ---------------------------------------
 # The real install (the tool is deployed since 2026-11-07): its files and link must not change during the suite.
-real_install_fp() { { find "$REAL_HOME/opt/agent-auto-close" -type f -exec md5 -q {} \; 2>/dev/null; readlink "$REAL_HOME/.local/bin/agent-auto-close"; } | md5 -q; }
+real_install_fp() { { find "$REAL_HOME/opt/claude-close-keep-screen" -type f -exec md5 -q {} \; 2>/dev/null; readlink "$REAL_HOME/.local/bin/claude-close-keep-screen"; } | md5 -q; }
 REAL_FP_BEFORE=$(real_install_fp)
 bash "$REPO/install.sh" >> "$LOG" 2>&1; check "install exits 0" test $? -eq 0
-check "install: link in ~/.local/bin points into ~/opt/agent-auto-close" test "$(readlink "$AAC")" = "$HOME/opt/agent-auto-close/bin/agent-auto-close"
+check "install: link in ~/.local/bin points into ~/opt/claude-close-keep-screen" test "$(readlink "$AAC")" = "$HOME/opt/claude-close-keep-screen/bin/claude-close-keep-screen"
 check "install: deployed copy runs" "$AAC" --version
 bash "$REPO/install.sh" >> "$LOG" 2>&1; check "install: re-run is idempotent" test $? -eq 0 -a -L "$AAC"
 check "install: nothing written in the real HOME" test "$(real_install_fp)" = "$REAL_FP_BEFORE"
@@ -198,11 +198,11 @@ check "ambiguous uuid prefix: refused" has "$O" "several running Claude sessions
 check "ambiguous uuid prefix: both still running" alive "$(pid_of "$U_AMB1")"
 
 check "refusals: no SIGTERM was sent" test ! -s "$TERM_LOG"
-check "refusals: logged" test "$(grep -c '"event": "refused"' "$HOME/opt/agent-auto-close/logs/close.jsonl")" -eq 9
+check "refusals: logged" test "$(grep -c '"event": "refused"' "$HOME/opt/claude-close-keep-screen/logs/close.jsonl")" -eq 9
 
 # -- 4. the close itself ---------------------------------------------------------------
 verify_closed() {   # verify_closed <label> <uuid> <pid> <pane>
-    local label=$1 uuid=$2 pid=$3 pane=$4 screen="$HOME/opt/agent-auto-close/data/close-screens/$2.txt"
+    local label=$1 uuid=$2 pid=$3 pane=$4 screen="$HOME/opt/claude-close-keep-screen/data/close-screens/$2.txt"
     sleep 0.5
     check "$label: exit 0" test $RC -eq 0
     check "$label: process ended" dead "$pid"
@@ -213,7 +213,7 @@ verify_closed() {   # verify_closed <label> <uuid> <pid> <pane>
     tmx capture-pane -p -S - -t "$pane" > "$S/pane.txt"   # with the scrollback: the screen file is taller than the pane; cat "$S/pane.txt" >> "$LOG"
     check "$label: pane shows the screen file" has "$S/pane.txt" "FAKE-CLAUDE-SCREEN $uuid"
     check "$label: 'claude --resume <uuid>' pre-typed, not run" test "$(grep -v '^ *$' "$S/pane.txt" | tail -1)" = "\$ claude --resume $uuid"
-    check "$label: logged" has "$HOME/opt/agent-auto-close/logs/close.jsonl" "\"event\": \"close\", \"by\": \"hand\", \"uuid\": \"$uuid\""
+    check "$label: logged" has "$HOME/opt/claude-close-keep-screen/logs/close.jsonl" "\"event\": \"close\", \"by\": \"hand\", \"uuid\": \"$uuid\""
 }
 
 U_C1=$(uuid_of); start_fake "$U_C1" idle; PANE_C1=$FAKE_PANE; P_C1=$(pid_of "$U_C1")
@@ -236,7 +236,7 @@ check "log rows start with ts then dt" python3 -c '
 import json, sys
 for l in open(sys.argv[1]):
     k = list(json.loads(l))[:2]
-    assert k == ["ts", "dt"], k' "$HOME/opt/agent-auto-close/logs/close.jsonl"
+    assert k == ["ts", "dt"], k' "$HOME/opt/claude-close-keep-screen/logs/close.jsonl"
 
 # -- 5. idle --over <hours> -------------------------------------------------------------------
 for p in "$P_BUSY" "$P_SELF" "$P_ANC" "$P_NOTMUX" "$P_KIND" "$P_GONEPANE" "$P_WRONGPANE" "$(pid_of "$U_AMB1")" "$(pid_of "$U_AMB2")"; do stop_fake "$p"; done
@@ -264,7 +264,7 @@ check "idle: exit 0" test $RC -eq 0
 sleep 0.5
 check "idle: the 30 h one ended by SIGTERM" has "$TERM_LOG" "SIGTERM $P_I1"
 check "idle: the 30 h one has its resume pre-typed" bash -c "tmux -S '$SOCK' capture-pane -p -t '$PANE_I1' | grep -v '^ *\$' | tail -1 | grep -qxF '\$ claude --resume $U_I1'"
-check "idle: logged with the rule" has "$HOME/opt/agent-auto-close/logs/close.jsonl" "\"by\": \"idle --over 24\", \"uuid\": \"$U_I1\""
+check "idle: logged with the rule" has "$HOME/opt/claude-close-keep-screen/logs/close.jsonl" "\"by\": \"idle --over 24\", \"uuid\": \"$U_I1\""
 check "idle: the 2 h one still running" alive "$P_I2"
 check "idle: the busy one still running" alive "$P_I3"
 check "idle: the one without a transcript still running" alive "$P_I4"
@@ -287,10 +287,10 @@ check "agent-tracker's last prompt is used" has "$O" "${U_I2:0:8}  last prompt 2
 mv "$S/bin/agent-tracker" "$S/set-aside/"
 
 # -- 6. uninstall.sh ------------------------------------------------------------------------
-bash "$HOME/opt/agent-auto-close/uninstall.sh" >> "$LOG" 2>&1; check "uninstall exits 0" test $? -eq 0
+bash "$HOME/opt/claude-close-keep-screen/uninstall.sh" >> "$LOG" 2>&1; check "uninstall exits 0" test $? -eq 0
 check "uninstall: link removed" test ! -e "$AAC" -a ! -L "$AAC"
-check "uninstall: deployed copy removed" test ! -e "$HOME/opt/agent-auto-close/bin/agent-auto-close"
-check "uninstall: screen files and log kept" test -s "$HOME/opt/agent-auto-close/logs/close.jsonl" -a -d "$HOME/opt/agent-auto-close/data/close-screens"
+check "uninstall: deployed copy removed" test ! -e "$HOME/opt/claude-close-keep-screen/bin/claude-close-keep-screen"
+check "uninstall: screen files and log kept" test -s "$HOME/opt/claude-close-keep-screen/logs/close.jsonl" -a -d "$HOME/opt/claude-close-keep-screen/data/close-screens"
 
-echo "agent-auto-close tests: $PASS passed, $FAIL failed (log: $LOG)"
+echo "claude-close-keep-screen tests: $PASS passed, $FAIL failed (log: $LOG)"
 [[ $FAIL -eq 0 ]]
