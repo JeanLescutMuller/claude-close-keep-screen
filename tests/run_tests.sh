@@ -127,7 +127,7 @@ check "install: nothing written in the real HOME" test "$(real_install_fp)" = "$
 
 # -- 2. the sandbox tmux server ---------------------------------------------------------
 tmx new-session -d -s test -x 200 -y 50 -c "$S" "bash --norc --noprofile"
-check "tmux: the server's socket is the sandbox one (or tmux_guard's)" test "$(tmux display -p '#{socket_path}')" = "${TMUX_GUARD_SOCKET:-$SOCK}"
+check "tmux: the server's socket is the sandbox one (or run_with_test_tmux.sh's)" test "$(tmux display -p '#{socket_path}')" = "${TEST_TMUX_SOCKET:-$SOCK}"
 PANE0=$(tmx display -p -t test:0 '#{pane_id}')
 
 # -- 3. refusals: nothing is signalled ------------------------------------------------
