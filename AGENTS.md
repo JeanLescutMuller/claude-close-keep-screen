@@ -1,5 +1,7 @@
 # claude-close-keep-screen
 
+Development home: NAS (moving: until the move, edit it on the Mac; task D3). Why (U19, the user, 2026-11-22): the NAS by default; its Mac parts are installed on the Mac from GitHub with one command.
+
 **Closing Claude sessions: by hand (`close`, was `asm close`) and the rule for closing idle ones (`idle`), each leaving the Claude session resumable in its tmux pane.** Part of agent-tracker v1 (`/Users/jeanlescut/dev/agent-tracker/DESIGN.md` §10, `IMPLEMENTATION.md` §5).
 
 ## Rules
