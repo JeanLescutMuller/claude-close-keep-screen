@@ -14,15 +14,17 @@ FAKE="$REPO/tests/fake_claude.py"
 S=$(cd "$(mktemp -d)" && pwd -P)   # the real path: tmux reports its socket by it
 REAL_HOME=$HOME
 LOG="$S/test.log"
-PY_DIR=$(dirname "$(command -v python3)")
-TMUX_DIR=$(dirname "$(command -v tmux)")
+PYTHON3=$(command -v python3); TMUX_BIN=$(command -v tmux)
 
 # -- The sandbox: every path the tool or tmux uses is under $S ----------------
 unset TMUX TMUX_PANE CLAUDE_CODE_SESSION_ID CLAUDE_CLOSE_KEEP_SCREEN_HOME
 export SANDBOX="$S" HOME="$S/home" CLAUDE_CONFIG_DIR="$S/home/.claude" TMUX_TMPDIR="$S/tmux" JR_MACHINE_NAME=test-machine
 export AGENT_TRACKER_HOME="$S/home/opt/agent-tracker" AGENT_RESUME_HOME="$S/home/opt/agent-resume"
-export PATH="$S/bin:$S/home/.local/bin:$PY_DIR:$TMUX_DIR:/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH="$S/bin:$S/home/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 mkdir -p "$HOME" "$CLAUDE_CONFIG_DIR/sessions" "$CLAUDE_CONFIG_DIR/projects/-sandbox" "$TMUX_TMPDIR" "$S/bin"
+# python3 and tmux by their own path, not their folder: uv's python3 and tmux live in ~/.local/bin (the NAS; the Mac's
+# python3 since 2026-11-22), next to the real agent-tracker the sandbox must not see.
+for b in "$PYTHON3:python3" "$TMUX_BIN:tmux"; do printf '#!/bin/sh\nexec "%s" "$@"\n' "${b%%:*}" > "$S/bin/${b##*:}"; chmod +x "$S/bin/${b##*:}"; done
 SOCK="$TMUX_TMPDIR/tmux-$(id -u)/default"   # where tmux puts its socket under TMUX_TMPDIR
 mkdir -p -m 700 "$(dirname "$SOCK")"
 tmx() { tmux -S "$SOCK" "$@"; }
@@ -117,7 +119,8 @@ echo "sandbox: $S" > "$LOG"
 
 # -- 1. install.sh, only with HOME=<sandbox> ---------------------------------------
 # The real install (the tool is deployed since 2026-11-07): its files and link must not change during the suite.
-real_install_fp() { { find "$REAL_HOME/opt/claude-close-keep-screen" -type f -exec md5 -q {} \; 2>/dev/null; readlink "$REAL_HOME/.local/bin/claude-close-keep-screen"; } | md5 -q; }
+# cksum: POSIX, the same on macOS and Linux (md5 is macOS's, md5sum Linux's)
+real_install_fp() { { find "$REAL_HOME/opt/claude-close-keep-screen" -type f -exec cksum {} + 2>/dev/null | sort; readlink "$REAL_HOME/.local/bin/claude-close-keep-screen"; } | cksum; }
 REAL_FP_BEFORE=$(real_install_fp)
 bash "$REPO/install.sh" >> "$LOG" 2>&1; check "install exits 0" test $? -eq 0
 check "install: link in ~/.local/bin points into ~/opt/claude-close-keep-screen" test "$(readlink "$AAC")" = "$HOME/opt/claude-close-keep-screen/bin/claude-close-keep-screen"
