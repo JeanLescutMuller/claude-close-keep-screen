@@ -1,7 +1,7 @@
 # Testing claude-close-keep-screen
 
 ```bash
-bash /Users/jeanlescut/dev/claude-close-keep-screen/tests/run_tests.sh
+bash /Users/jeanlescut/dev/agents/claude-close-keep-screen/tests/run_tests.sh
 ```
 
 Runs in a sandbox (`mktemp -d`): its own `HOME`, `CLAUDE_CONFIG_DIR` and a separate tmux server (`TMUX_TMPDIR`, `TMUX` unset); install.sh and uninstall.sh run with that `HOME`. Fake Claude sessions are `tests/fake_claude.py` processes started in the sandbox's tmux panes. It prints one line per failure and the totals; the full log is `<sandbox>/test.log` (path printed). Takes about 30 s (one test waits the 5 s SIGTERM timeout).

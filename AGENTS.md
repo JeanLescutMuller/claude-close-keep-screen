@@ -1,8 +1,8 @@
 # claude-close-keep-screen
 
-Development home: NAS (`~/dev/claude-close-keep-screen` on the NAS, since 2026-11-22; no copy on the Mac: `tm claude-close-keep-screen` opens it). Why (U19, the user, 2026-11-22): the NAS by default; its Mac parts are installed on the Mac from GitHub with one command: `dev-install claude-close-keep-screen` (my-setup).
+Development home: NAS (`~/dev/agents/claude-close-keep-screen` on the NAS, since 2026-11-22; no copy on the Mac: `tm claude-close-keep-screen` opens it). Why (U19, the user, 2026-11-22): the NAS by default; its Mac parts are installed on the Mac from GitHub with one command: `dev-install claude-close-keep-screen` (my-setup).
 
-**Closing Claude sessions: by hand (`close`, was `asm close`) and the rule for closing idle ones (`idle`), each leaving the Claude session resumable in its tmux pane.** Part of agent-tracker v1 (`/Users/jeanlescut/dev/agent-tracker/DESIGN.md` §10, `IMPLEMENTATION.md` §5).
+**Closing Claude sessions: by hand (`close`, was `asm close`) and the rule for closing idle ones (`idle`), each leaving the Claude session resumable in its tmux pane.** Part of agent-tracker v1 (`/Users/jeanlescut/dev/agents/agent-tracker/DESIGN.md` §10, `IMPLEMENTATION.md` §5).
 
 ## Rules
 
@@ -39,4 +39,4 @@ The only words for these concepts, in every file and when talking to the user. A
 |---|---|
 | the code (one file) | `src/claude-close-keep-screen` |
 | the fake Claude used by tests | `tests/fake_claude.py` |
-| the contract with agent-tracker and agent-resume | `/Users/jeanlescut/dev/agent-tracker/IMPLEMENTATION.md` §3-§5 |
+| the contract with agent-tracker and agent-resume | `/Users/jeanlescut/dev/agents/agent-tracker/IMPLEMENTATION.md` §3-§5 |
