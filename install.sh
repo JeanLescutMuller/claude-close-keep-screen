@@ -4,6 +4,9 @@
 #   ~/opt/claude-close-keep-screen/bin/claude-close-keep-screen   the deployed copy (from src/claude-close-keep-screen)
 #   ~/opt/claude-close-keep-screen/{data,logs}/           screen files and the close log (kept by uninstall.sh)
 #   ~/.local/bin/claude-close-keep-screen                 symlink to the deployed copy
+#   ~/opt/claude-close-keep-screen/skills/close/          the /close skill (from skills/close), linked as ~/.claude/skills/close
+#   ~/.claude/settings.json, hooks.UserPromptSubmit      our one group, `claude-close-keep-screen hook` (src/merge_claude_hooks.py):
+#                                                        it turns the prompt /close into `claude-close-keep-screen self`
 #
 # No scheduler is installed: when `claude-close-keep-screen idle` runs is not decided yet (README.md).
 # Idempotent: safe to re-run at any time. Usage: bash install.sh
@@ -32,7 +35,10 @@ mkdir -p "$OPT/bin" "$OPT/data/close-screens" "$OPT/logs" "$BIN_DIR"
 cp "$SRC/src/claude-close-keep-screen" "$OPT/bin/.claude-close-keep-screen.new"
 chmod 755 "$OPT/bin/.claude-close-keep-screen.new"
 mv -f "$OPT/bin/.claude-close-keep-screen.new" "$OPT/bin/claude-close-keep-screen"
+cp "$SRC/src/merge_claude_hooks.py" "$OPT/bin/merge_claude_hooks.py"
 cp "$SRC/uninstall.sh" "$OPT/uninstall.sh"
+mkdir -p "$OPT/skills/close"
+cp "$SRC/skills/close/SKILL.md" "$OPT/skills/close/SKILL.md"
 
 # A real file at the link path is not ours to replace: keep it and warn.
 if [[ -e "$LINK" && ! -L "$LINK" ]]; then
@@ -40,6 +46,16 @@ if [[ -e "$LINK" && ! -L "$LINK" ]]; then
 else
     ln -sfn "$OPT/bin/claude-close-keep-screen" "$LINK"
 fi
+
+# The /close skill: shared by every Claude account through ~/.claude/skills (account-<name>/skills links to it).
+SKILL_LINK="$HOME/.claude/skills/close"
+mkdir -p "$HOME/.claude/skills"
+if [[ -e "$SKILL_LINK" && ! ( -L "$SKILL_LINK" && "$(readlink "$SKILL_LINK")" == "$OPT/"* ) ]]; then
+    echo "WARNING: $SKILL_LINK exists and is not ours: left as is; /close still works through the hook." >&2
+else
+    ln -sfn "$OPT/skills/close" "$SKILL_LINK"
+fi
+echo "Claude Code hook (UserPromptSubmit, /close): $(python3 "$OPT/bin/merge_claude_hooks.py" set)"
 
 case ":$PATH:" in *":$BIN_DIR:"*) ;; *) echo "NOTE: $BIN_DIR is not on your PATH." ;; esac
 echo "Installed claude-close-keep-screen $("$OPT/bin/claude-close-keep-screen" --version | awk '{print $2}') in $OPT (link: $LINK)."

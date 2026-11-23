@@ -5,7 +5,8 @@ Writes $CLAUDE_CONFIG_DIR/sessions/<own pid>.json the way Claude Code does (pid,
 kind, tmux "session:@window.%pane" from $TMUX_PANE, status, statusUpdatedAt), draws a marker on the
 terminal's alternate screen, then sleeps. On SIGTERM: appends "SIGTERM <pid>" to --term-file, removes
 its sessions file and exits 0 (unless --ignore-term). --exec-after runs a command as its own child
-(to test "never close yourself"), writing its output to --exec-out.
+(to test "never close yourself", and `self`), writing its output to --exec-out. --idle-after N: busy, then idle
+after N s (a `!` command or a blocked prompt ending).
 """
 import argparse
 import json
@@ -25,6 +26,7 @@ p.add_argument("--term-file", required=True)
 p.add_argument("--ignore-term", action="store_true")
 p.add_argument("--exec-after")
 p.add_argument("--exec-out")
+p.add_argument("--idle-after", type=float, help="status busy until this many seconds after the start, then idle")
 args = p.parse_args()
 
 pid = os.getpid()
@@ -71,5 +73,11 @@ sys.stdout.flush()
 if args.exec_after:
     with open(args.exec_out, "w") as out:
         subprocess.run(args.exec_after, shell=True, stdout=out, stderr=subprocess.STDOUT)
+t0 = time.time()
 while True:
-    time.sleep(1)
+    if args.idle_after is not None and doc["status"] != "idle" and time.time() - t0 >= args.idle_after:
+        doc["status"] = "idle"
+        with open(path + ".tmp", "w") as f:
+            json.dump(doc, f)
+        os.replace(path + ".tmp", path)
+    time.sleep(0.2)

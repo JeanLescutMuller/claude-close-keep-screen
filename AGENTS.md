@@ -2,12 +2,14 @@
 
 Development home: NAS (`~/dev/agents/claude-close-keep-screen` on the NAS, since 2026-11-22; no copy on the Mac: `tm claude-close-keep-screen` opens it). Why (U19, the user, 2026-11-22): the NAS by default; its Mac parts are installed on the Mac from GitHub with one command: `dev-install claude-close-keep-screen` (my-setup).
 
-**Closing Claude sessions: by hand (`close`, was `asm close`) and the rule for closing idle ones (`idle`), each leaving the Claude session resumable in its tmux pane.** Part of agent-tracker v1 (`/Users/jeanlescut/dev/agents/agent-tracker/DESIGN.md` §10, `IMPLEMENTATION.md` §5).
+**Closing Claude sessions: by hand (`close`, was `asm close`), from inside the Claude session itself (`/close` or `!claude-close-keep-screen self`), and the rule for closing idle ones (`idle`), each leaving the Claude session resumable in its tmux pane.** Part of agent-tracker v1 (`/Users/jeanlescut/dev/agents/agent-tracker/DESIGN.md` §10, `IMPLEMENTATION.md` §5).
 
 ## Rules
 
 - **Never send a signal or keys to anything a test did not start.** Tests run only in the sandbox of `tests/run_tests.sh`: `HOME`, `CLAUDE_CONFIG_DIR`, `CLAUDE_CLOSE_KEEP_SCREEN_HOME`, `TMUX_TMPDIR` inside `mktemp -d`, with `TMUX` unset (else tmux talks to the user's default server). Never run `install.sh` / `uninstall.sh` with the real `HOME` unless the user asks.
-- **Every safety check runs before anything is captured or signalled** (`check_closeable` in `src/claude-close-keep-screen`): not self (`CLAUDE_CODE_SESSION_ID`, or the Claude process is an ancestor of this command), not busy, in tmux with kind `interactive` (or else attached to no terminal at all: plain SIGTERM, no capture), pid alive, pid start time = the sessions file's `procStart`, the pane exists and holds the pid. A new check goes there, never after the capture.
+- **Every safety check runs before anything is captured or signalled** (`check_closeable` in `src/claude-close-keep-screen`): not self (`CLAUDE_CODE_SESSION_ID`, or the Claude process is an ancestor of this command; only `self` skips it), not busy, in tmux with kind `interactive` (or else attached to no terminal at all: plain SIGTERM, no capture), pid alive, pid start time = the sessions file's `procStart`, the pane exists and holds the pid. A new check goes there, never after the capture.
+- **A Claude session closes itself only through `self`** (the user, 2026-11-23): `/close` (the UserPromptSubmit hook, `hook`) or `!claude-close-keep-screen self`. `self` runs the checks it can (all but "not busy": the session is busy running it), starts a detached helper and returns; the helper waits until the session is idle (at most 120 s), then runs every check again but "not self", and closes. `close` and `idle` keep refusing self.
+- **The hook runs on every prompt of every Claude session**: anything but `/close` returns at once with no output (about 0.08 s), and an error never blocks a prompt. `/close` needs the skill `skills/close` (without it Claude Code answers "Unknown command" before any hook runs, tested 2026-11-23); the skill has `disable-model-invocation: true`, so the model never closes its own session.
 - **SIGTERM only, never SIGKILL**: Claude Code flushes its transcript on SIGTERM. If it has not exited after 5 s, leave the pane untouched and exit 1.
 - **The pid, status and kind come only from `$CLAUDE_CONFIG_DIR/sessions/<pid>.json`.** `agent-tracker now --json` (when on the PATH) only adds the last prompt, the pane and the transcript path.
 - **No scheduler**: when `idle` runs is not decided (the user, 2026-11-07). Do not add a trigger without the user; when one is added, follow skill `jobs-and-services`.
@@ -18,7 +20,7 @@ Development home: NAS (`~/dev/agents/claude-close-keep-screen` on the NAS, since
 | | |
 |---|---|
 | test | `bash tests/run_tests.sh` (sandbox; ~30 s; one line per failure, full log path printed) |
-| deploy | `bash install.sh` (→ `~/opt/claude-close-keep-screen/bin/`, link `~/.local/bin/claude-close-keep-screen`); remove: `bash ~/opt/claude-close-keep-screen/uninstall.sh` |
+| deploy | `bash install.sh` (→ `~/opt/claude-close-keep-screen/bin/`, link `~/.local/bin/claude-close-keep-screen`; the `/close` skill, link `~/.claude/skills/close`; our UserPromptSubmit group in `~/.claude/settings.json`, by `src/merge_claude_hooks.py`, skill config-ownership); remove: `bash ~/opt/claude-close-keep-screen/uninstall.sh` |
 
 ## Vocabulary
 
@@ -28,6 +30,7 @@ The only words for these concepts, in every file and when talking to the user. A
 |---|---|---|
 | **Claude session** | one running Claude Code process, known by its uuid and its `sessions/<pid>.json` | conversation, instance |
 | **close** | capture the pane, SIGTERM the Claude process, write the screen file, pre-type `claude --resume <uuid>` in the pane | kill, stop, terminate (for the whole act) |
+| **/close** | typed in a Claude session: closes that Claude session (`self`), its screen kept with a summary box | /exit (that one keeps nothing) |
 | **screen file** | `data/close-screens/<uuid>.txt`: the pane's last screen, cat back into the pane after the close | tombstone (asm's word) |
 | **busy** / **idle** | the `status` Claude Code writes in `sessions/<pid>.json` | active, inactive |
 | **last prompt** | the time of the transcript's last `user` entry that is not a tool result | last activity, last message |

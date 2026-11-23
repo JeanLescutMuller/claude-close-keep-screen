@@ -3,17 +3,23 @@
 
   claude-close-keep-screen close <uuid | uuid prefix | %pane>   close one Claude session by hand
   claude-close-keep-screen idle --over <hours> [--dry-run]       close the Claude sessions idle for longer than <hours>
+  claude-close-keep-screen self                                   close the Claude session this runs from (`!claude-close-keep-screen self`)
+  claude-close-keep-screen hook                                   Claude Code's UserPromptSubmit hook: `/close` = `self`, no model call
 
 A close: capture the tmux pane's screen, SIGTERM the Claude process (never SIGKILL: Claude Code
 flushes its transcript on SIGTERM), write the screen file, cat it back into the pane and pre-type
-`claude --resume <uuid>` there (no Enter). Ported from `asm close` (agent-session-manager
+`claude --resume <uuid>` there (no Enter).
+`self` (and `/close`, through the hook) is the one way to close the Claude session you are in (the user, 2026-11-23):
+it checks, starts a detached helper and returns; the helper waits until the session is idle (the `!` command or the
+blocked prompt has ended), then closes it and shows its screen with a summary box. Ported from `asm close` (agent-session-manager
 src/asm, lines 1538-1750, v4.7), with two more safety checks (the pid's start time, and the pane
 really holding the pid).
 
 Reads:  $CLAUDE_CONFIG_DIR/sessions/<pid>.json (Claude Code's own file per running Claude session),
         $CLAUDE_CONFIG_DIR/projects/*/<uuid>.jsonl (transcripts, for the last prompt),
         `agent-tracker now --json` when it is on the PATH (last prompt, pane, transcript).
-Writes: $CLAUDE_CLOSE_KEEP_SCREEN_HOME/data/close-screens/<uuid>.txt, $CLAUDE_CLOSE_KEEP_SCREEN_HOME/logs/close.jsonl
+Writes: $CLAUDE_CLOSE_KEEP_SCREEN_HOME/data/close-screens/<uuid>.txt, $CLAUDE_CLOSE_KEEP_SCREEN_HOME/logs/close.jsonl,
+        $CLAUDE_CLOSE_KEEP_SCREEN_HOME/logs/self.log (the detached helper's errors)
 """
 
 import argparse
@@ -30,12 +36,18 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-VERSION = "1.0"
+VERSION = "1.1"
 APP_HOME = os.environ.get("CLAUDE_CLOSE_KEEP_SCREEN_HOME") or os.path.expanduser("~/opt/claude-close-keep-screen")
 CLAUDE_DIR = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
 SCREENS_DIR = os.path.join(APP_HOME, "data", "close-screens")
 LOG_PATH = os.path.join(APP_HOME, "logs", "close.jsonl")
 TERM_TIMEOUT_S = 5.0          # asm close's value: wait this long for the process to exit after SIGTERM
+SELF_LOG_PATH = os.path.join(APP_HOME, "logs", "self.log")
+# self: how long the helper waits for the session to become idle (a `!` command ends at once; a /close that the hook
+# missed goes to the model, whose turn may take a minute), then how long it lets the screen redraw before capturing it.
+SELF_WAIT_S = float(os.environ.get("CLAUDE_CLOSE_KEEP_SCREEN_SELF_WAIT_S") or 120)
+SELF_SETTLE_S = 1.0
+CLOSE_PROMPT = "/close"
 LSTART_RE = re.compile(r"^[A-Z][a-z]{2} [A-Z][a-z]{2} +\d+ \d\d:\d\d:\d\d \d{4}$")   # `ps -o lstart` shape
 
 
@@ -100,9 +112,9 @@ def tracker_rows() -> Dict[str, Dict[str, Any]]:
     return {r.get("uuid"): r for r in l_rows if isinstance(r, dict) and r.get("uuid")}
 
 
-def live_sessions() -> List[Dict[str, Any]]:
+def live_sessions(with_tracker: bool = True) -> List[Dict[str, Any]]:
     """Every running local Claude session: Claude Code writes one sessions/<pid>.json per process."""
-    d_tracker = tracker_rows()
+    d_tracker = tracker_rows() if with_tracker else {}
     l_sessions = []
     for path in sorted(glob.glob(os.path.join(CLAUDE_DIR, "sessions", "*.json"))):
         try:
@@ -125,9 +137,9 @@ def pane_id_of(s: Dict[str, Any]) -> Optional[str]:
     return pid if isinstance(pid, str) and pid.startswith("%") else None
 
 
-def find_session(target: str) -> Dict[str, Any]:
+def find_session(target: str, with_tracker: bool = True) -> Dict[str, Any]:
     """The one running Claude session matching a uuid, a uuid prefix or a %pane."""
-    l_sessions = live_sessions()
+    l_sessions = live_sessions(with_tracker)
     if target.startswith("%"):
         l_match = [s for s in l_sessions if pane_id_of(s) == target]
     else:
@@ -139,6 +151,15 @@ def find_session(target: str) -> Dict[str, Any]:
     if not l_match:
         raise Refused(f"no running Claude session matches '{target}' (already exited, or on another machine).")
     return l_match[0]
+
+
+def own_session() -> Dict[str, Any]:
+    """The Claude session this command runs from: the one whose pid is an ancestor of this process."""
+    l_chain = ancestors(os.getpid(), ps_parents())
+    l_match = [s for s in live_sessions(with_tracker=False) if s.get("pid") in l_chain]
+    if not l_match:
+        raise Refused("not running inside a Claude session (no ancestor process has a sessions/<pid>.json).")
+    return min(l_match, key=lambda s: l_chain.index(s["pid"]))     # the nearest one
 
 
 def transcript_of(s: Dict[str, Any]) -> Optional[str]:
@@ -166,16 +187,25 @@ def is_not_typed(e: Dict[str, Any]) -> bool:
     return isinstance(content, str) and content.lstrip().startswith(("<task-notification>", "<system-reminder>"))
 
 
+def prompt_text(e: Dict[str, Any]) -> str:
+    content = (e.get("message") or {}).get("content", "")
+    if isinstance(content, list):
+        content = " ".join(x.get("text", "") for x in content if isinstance(x, dict) and x.get("type") == "text")
+    return " ".join(str(content).split())
+
+
 def last_prompt_ts(s: Dict[str, Any]) -> Optional[float]:
-    """The last prompt's time: agent-tracker's when it gives one, else the end of the transcript
-    (the last `user` entry that is not a tool result). Reads 1 MB from the end, then 4x more each
-    time nothing is found, up to the whole file."""
+    """The last prompt's time: agent-tracker's when it gives one, else the end of the transcript."""
     ts = parse_ts(s["_tracker"].get("last_prompt"))
-    if ts:
-        return ts
+    return ts or last_prompt(s)[0]
+
+
+def last_prompt(s: Dict[str, Any]) -> tuple:
+    """(time, text) of the transcript's last `user` entry that is not a tool result, or (None, ""). Reads 1 MB from
+    the end, then 4x more each time nothing is found, up to the whole file."""
     path = transcript_of(s)
     if not path:
-        return None
+        return None, ""
     size, chunk = os.path.getsize(path), 1 << 20
     while True:
         start = max(0, size - chunk)
@@ -194,9 +224,9 @@ def last_prompt_ts(s: Dict[str, Any]) -> Optional[float]:
             if isinstance(e, dict) and e.get("type") == "user" and not is_tool_result(e) and not is_not_typed(e):
                 ts = parse_ts(e.get("timestamp"))
                 if ts:
-                    return ts
+                    return ts, prompt_text(e)
         if start == 0:
-            return None
+            return None, ""
         chunk *= 4
 
 
@@ -216,17 +246,20 @@ def ancestors(pid: int, d_parent: Dict[int, int]) -> List[int]:
     return l_chain
 
 
-def check_closeable(s: Dict[str, Any]) -> Optional[str]:
+def check_closeable(s: Dict[str, Any], self_close: bool = False, ignore_busy: bool = False) -> Optional[str]:
     """Every safety check, cheapest first, before anything is captured or signalled; returns the %pane, or None for
     a session attached to no terminal (non-interactive, background): that one only gets a plain SIGTERM, there is no
     screen to keep (the user, 2026-11-19). A session in a terminal outside tmux is refused: SIGTERM would wipe its screen.
     The first six are asm close's; the pid start time and the pane-holds-pid checks are new: they stop
-    a stale sessions/<pid>.json from sending SIGTERM or keys to a process or pane that is not its own."""
+    a stale sessions/<pid>.json from sending SIGTERM or keys to a process or pane that is not its own.
+    self_close: `self` only (the one way to close your own session); ignore_busy: `self` before it detaches (the
+    session is busy running it; the helper waits for idle, then runs every check again without ignore_busy)."""
     pid, uuid = s.get("pid"), s["sessionId"]
     d_parent = ps_parents()
-    if os.environ.get("CLAUDE_CODE_SESSION_ID") == uuid or (isinstance(pid, int) and pid in ancestors(os.getpid(), d_parent)):
-        raise Refused("refusing to close the Claude session this command is running from.")
-    if s.get("status") == "busy":
+    if not self_close and (os.environ.get("CLAUDE_CODE_SESSION_ID") == uuid or
+                           (isinstance(pid, int) and pid in ancestors(os.getpid(), d_parent))):
+        raise Refused("refusing to close the Claude session this command is running from (use `self`, or /close in it).")
+    if s.get("status") == "busy" and not ignore_busy:
         raise Refused("the Claude session is busy (mid-task): never close a busy Claude session.")
     pane_id = pane_id_of(s) if s.get("kind") == "interactive" else None
     if not pane_id and tty_of(pid):
@@ -281,13 +314,80 @@ def terminate(pid: int) -> None:
                       f"check it by hand before retrying (it may be flushing a large transcript).")
 
 
-def close(s: Dict[str, Any], by: str) -> Optional[str]:
+ANSI = {"bold": "\033[1m", "dim": "\033[2m", "green": "\033[32m", "cyan": "\033[36m", "yellow": "\033[33m", "off": "\033[0m"}
+
+
+def cut(text: Any, n: int) -> str:
+    """One line of at most n characters ('…' when cut)."""
+    text = " ".join(str(text).split())
+    return text if len(text) <= n else text[:max(0, n - 1)] + "…"
+
+
+def cut_middle(text: Any, n: int) -> str:
+    """A path in at most n characters, its end kept (the file name): '/home/…/close-screens/<uuid>.txt'."""
+    text = str(text)
+    if len(text) <= n:
+        return text
+    head = max(0, (n - 1) // 3)
+    return text[:head] + "…" + text[len(text) - (n - 1 - head):]
+
+
+ANSI_RE = re.compile(r"\033\[[0-9;?]*[A-Za-z]")
+
+
+def without_input_box(l_lines: List[str]) -> List[str]:
+    """Claude Code's screen without its bottom: the empty input box (a ──── rule, the ❯ line, a ──── rule) and the
+    status lines under it; the summary box replaces them. Unchanged when that shape is not found."""
+    l_plain = [ANSI_RE.sub("", l).strip() for l in l_lines]
+    for i in range(len(l_plain) - 2, 0, -1):
+        if l_plain[i].startswith("❯") and set(l_plain[i - 1]) == {"─"} and set(l_plain[i + 1]) == {"─"}:
+            return l_lines[:i - 1]
+    return l_lines
+
+
+def local_time(ts: float) -> str:
+    return datetime.fromtimestamp(ts).astimezone().strftime("%Y-%m-%d %H:%M %Z")
+
+
+def summary_box(s: Dict[str, Any], mem: Optional[int], closed_ts: float, screen: str, width: int) -> str:
+    """The box shown under the kept screen after `self`: what was closed, and how to resume it. Coloured with ANSI;
+    the padding is counted on the plain text (every character used here is one column wide)."""
+    a = ANSI
+    inner = max(50, min(width, 100)) - 2
+    uuid = s["sessionId"]
+    started = parse_ts(s.get("startedAt"))
+    lp_ts, lp_text = last_prompt(s)
+    l_rows = [("Name", s.get("name") or "-"), ("Session", uuid), ("Folder", s.get("cwd") or "-")]
+    if started:
+        l_rows.append(("Ran for", f"{human_age(closed_ts - started)} (since {local_time(started)})"))
+    if lp_ts:
+        l_rows.append(("Last prompt", f"{human_age(closed_ts - lp_ts)} ago: {lp_text}"))
+    l_rows += [("Memory", f"{mem} MB freed" if mem is not None else "-"),
+               ("Transcript", transcript_of(s) or "-"), ("Screen file", screen)]
+    l_paths = ("Folder", "Transcript", "Screen file")
+
+    def line(plain: str, styled: str) -> str:
+        return f"{a['cyan']}│{a['off']}{styled}{' ' * (inner - len(plain))}{a['cyan']}│{a['off']}"
+    rule = lambda l, r: f"{a['cyan']}{l}{'─' * inner}{r}{a['off']}"
+    title = " " + cut(f"✔ Claude session closed at {local_time(closed_ts)}: its screen is kept above", inner - 1)
+    l_out = [rule("╭", "╮"), line(title, f"{a['bold']}{a['green']}{title}{a['off']}"), rule("├", "┤")]
+    for key, val in l_rows:
+        key = f" {key:<12}"
+        val = (cut_middle if key.strip() in l_paths else cut)(val, inner - len(key) - 1)
+        l_out.append(line(key + val, f"{a['dim']}{key}{a['off']}{val}"))
+    resume = " " + cut(f"▶ Press Enter to resume: claude --resume {uuid}", inner - 1)
+    l_out += [rule("├", "┤"), line(resume, f"{a['bold']}{a['yellow']}{resume}{a['off']}"), rule("╰", "╯")]
+    return "\n".join(l_out) + "\n"
+
+
+def close(s: Dict[str, Any], by: str, self_close: bool = False) -> Optional[str]:
     """Close one running Claude session; returns the screen file (None for a session with no terminal: plain SIGTERM).
-    Raises Refused or CloseFailed."""
+    self_close: the session is the one `self` ran from: no self refusal, and its screen comes back cleared, with
+    the summary box under it. Raises Refused or CloseFailed."""
     pid, uuid = s.get("pid"), s["sessionId"]
     name = s.get("name") or uuid
     try:
-        pane_id = check_closeable(s)
+        pane_id = check_closeable(s, self_close=self_close)
     except Refused as e:
         log({"event": "refused", "by": by, "uuid": uuid, "name": name, "pid": pid, "reason": str(e)})
         raise
@@ -319,13 +419,32 @@ def close(s: Dict[str, Any], by: str) -> Optional[str]:
     os.makedirs(SCREENS_DIR, exist_ok=True)
     screen = os.path.join(SCREENS_DIR, f"{uuid}.txt")
     with open(screen, "w", encoding="utf-8") as f:
-        f.write(f"───── CLOSED {dt_of(closed_ts)} · idle {human_age(idle_s)} · {mem}MB freed ─────\n")
-        f.write(capture if capture.endswith("\n") else capture + "\n")
-        f.write(f"───── resume: claude --resume {uuid} (typed below: press Enter) ─────\n")
+        if self_close:
+            l_lines = without_input_box(capture.rstrip("\n").split("\n"))
+            while l_lines and not ANSI_RE.sub("", l_lines[-1]).strip():
+                l_lines.pop()                       # the pane's empty bottom lines
+            width = subprocess.run(["tmux", "display", "-p", "-t", pane_id, "#{pane_width}"],
+                                   capture_output=True, text=True).stdout.strip()
+            f.write("\n".join(l_lines) + "\n" + summary_box(s, mem, closed_ts, screen, int(width) if width.isdigit() else 80))
+        else:
+            f.write(f"───── CLOSED {dt_of(closed_ts)} · idle {human_age(idle_s)} · {mem}MB freed ─────\n")
+            f.write(capture if capture.endswith("\n") else capture + "\n")
+            f.write(f"───── resume: claude --resume {uuid} (typed below: press Enter) ─────\n")
 
     # cat puts the text in the pane's normal screen, so it stays; the resume command is typed
-    # without Enter: the pane becomes its own resume button.
-    subprocess.run(["tmux", "send-keys", "-t", pane_id, f"cat {shlex.quote(screen)}", "Enter"])
+    # without Enter: the pane becomes its own resume button. self: the screen is cleared first, so the kept screen
+    # starts at the top; the leading space keeps the line out of the shell's history (ignorespace).
+    show = f" printf '\\033[H\\033[2J'; cat {shlex.quote(screen)}" if self_close else f"cat {shlex.quote(screen)}"
+    subprocess.run(["tmux", "send-keys", "-t", pane_id, "-l", show])
+    subprocess.run(["tmux", "send-keys", "-t", pane_id, "Enter"])
+    if self_close:     # let cat finish first: keys typed meanwhile are echoed by the terminal, then again by the shell
+        time.sleep(0.3)
+        for _ in range(20):
+            cmd = subprocess.run(["tmux", "display", "-p", "-t", pane_id, "#{pane_current_command}"],
+                                 capture_output=True, text=True).stdout.strip()
+            if cmd != "cat":
+                break
+            time.sleep(0.1)
     subprocess.run(["tmux", "send-keys", "-t", pane_id, f"claude --resume {uuid}"])
     subprocess.run(["tmux", "select-pane", "-t", pane_id, "-T", f"closed: {name}"], stderr=subprocess.DEVNULL)
     log({"event": "close", "by": by, "uuid": uuid, "name": name, "pid": pid, "pane": pane_id,
@@ -384,6 +503,77 @@ def cmd_idle(over_h: float, dry_run: bool) -> int:
     return 1 if failed else 0
 
 
+def start_self() -> str:
+    """`self` and `/close`: the checks that can run now, then a detached helper (its own session, so it outlives the
+    Claude process and the `!` command or hook that started it). Returns the message for the user. Raises Refused."""
+    s = own_session()
+    if not check_closeable(s, self_close=True, ignore_busy=True):
+        raise Refused("this Claude session is not in a tmux pane: there is no screen to keep.")
+    os.makedirs(os.path.dirname(SELF_LOG_PATH), exist_ok=True)
+    with open(SELF_LOG_PATH, "a", encoding="utf-8") as err:
+        subprocess.Popen([sys.executable, os.path.realpath(__file__), "self-helper", s["sessionId"], str(s["pid"])],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err, start_new_session=True)
+    return f"⏻ Closing this Claude session ({s.get('name') or s['sessionId'][:8]}): its screen stays here, resume typed below."
+
+
+def cmd_self() -> int:
+    try:
+        print(start_self(), flush=True)
+        return 0
+    except Refused as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_hook() -> int:
+    """Claude Code's UserPromptSubmit hook, run on every prompt: anything but /close passes untouched (no output);
+    /close is blocked (never reaches the model) and starts `self`. Never fails a prompt: any error passes it on."""
+    try:
+        d = json.load(sys.stdin)
+    except ValueError:
+        return 0
+    if not isinstance(d, dict) or str(d.get("prompt", "")).strip() != CLOSE_PROMPT:
+        return 0
+    try:
+        reason = start_self()
+    except Refused as e:
+        reason = f"claude-close-keep-screen: not closed: {e}"
+    print(json.dumps({"decision": "block", "reason": reason}))
+    return 0
+
+
+def cmd_self_helper(uuid: str, pid: int) -> int:
+    """The detached half of `self`: wait until the session is idle, let the screen redraw, then close it."""
+    path = os.path.join(CLAUDE_DIR, "sessions", f"{pid}.json")
+    deadline = time.time() + SELF_WAIT_S
+    status = None
+    while time.time() < deadline:
+        try:
+            with open(path, encoding="utf-8") as f:
+                status = json.load(f).get("status")
+        except (OSError, ValueError):
+            status = None
+        if status != "busy":
+            break
+        time.sleep(0.2)
+    time.sleep(SELF_SETTLE_S)
+    try:
+        s = find_session(uuid, with_tracker=False)
+        if s.get("pid") != pid:
+            raise Refused(f"the Claude session {uuid} is now pid {s.get('pid')}, not {pid}.")
+        if s.get("status") == "busy":
+            raise Refused(f"still busy after {SELF_WAIT_S:.0f} s: not closed (a new prompt was sent?).")
+        close(s, by="self", self_close=True)
+        return 0
+    except (Refused, CloseFailed) as e:
+        if not isinstance(e, CloseFailed):      # close() logs its own refusals and failures
+            log({"event": "refused", "by": "self", "uuid": uuid, "pid": pid, "reason": str(e)})
+        print(f"{dt_of(time.time())} {uuid}: {e}", file=sys.stderr)
+        subprocess.run(["tmux", "display-message", "-d", "8000", f"claude-close-keep-screen: not closed: {e}"],
+                       stderr=subprocess.DEVNULL)
+        return 1
+
+
 def main() -> int:
     p = argparse.ArgumentParser(prog="claude-close-keep-screen", description=__doc__.split("\n\n")[0],
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -394,9 +584,20 @@ def main() -> int:
     pi = sub.add_parser("idle", help="close the Claude sessions idle for longer than --over hours")
     pi.add_argument("--over", type=float, required=True, metavar="HOURS", help="last prompt older than this many hours")
     pi.add_argument("--dry-run", action="store_true", help="list them and run the safety checks; close nothing")
+    sub.add_parser("self", help="close the Claude session this runs from (`!claude-close-keep-screen self`)")
+    sub.add_parser("hook", help="Claude Code's UserPromptSubmit hook: /close = self (reads the hook's JSON on stdin)")
+    ph = sub.add_parser("self-helper", help="(internal) the detached half of self")
+    ph.add_argument("uuid")
+    ph.add_argument("pid", type=int)
     args = p.parse_args()
     if args.command == "close":
         return cmd_close(args.target)
+    if args.command == "self":
+        return cmd_self()
+    if args.command == "hook":
+        return cmd_hook()
+    if args.command == "self-helper":
+        return cmd_self_helper(args.uuid, args.pid)
     if args.over <= 0:
         p.error("--over must be more than 0 hours")
     return cmd_idle(args.over, args.dry_run)

@@ -120,13 +120,17 @@ echo "sandbox: $S" > "$LOG"
 # -- 1. install.sh, only with HOME=<sandbox> ---------------------------------------
 # The real install (the tool is deployed since 2026-11-07): its files and link must not change during the suite.
 # cksum: POSIX, the same on macOS and Linux (md5 is macOS's, md5sum Linux's)
-real_install_fp() { { find "$REAL_HOME/opt/claude-close-keep-screen" -type f -exec cksum {} + 2>/dev/null | sort; readlink "$REAL_HOME/.local/bin/claude-close-keep-screen"; } | cksum; }
+real_install_fp() { { find "$REAL_HOME/opt/claude-close-keep-screen" -type f -exec cksum {} + 2>/dev/null | sort; readlink "$REAL_HOME/.local/bin/claude-close-keep-screen";
+                     cksum "$(readlink -f "$REAL_HOME/.claude/settings.json")" 2>/dev/null; readlink "$REAL_HOME/.claude/skills/close"; } | cksum; }
 REAL_FP_BEFORE=$(real_install_fp)
 bash "$REPO/install.sh" >> "$LOG" 2>&1; check "install exits 0" test $? -eq 0
 check "install: link in ~/.local/bin points into ~/opt/claude-close-keep-screen" test "$(readlink "$AAC")" = "$HOME/opt/claude-close-keep-screen/bin/claude-close-keep-screen"
 check "install: deployed copy runs" "$AAC" --version
 bash "$REPO/install.sh" >> "$LOG" 2>&1; check "install: re-run is idempotent" test $? -eq 0 -a -L "$AAC"
 check "install: nothing written in the real HOME" test "$(real_install_fp)" = "$REAL_FP_BEFORE"
+SETTINGS="$CLAUDE_CONFIG_DIR/settings.json"
+check "install: the /close hook is in settings.json, once" test "$(grep -c 'claude-close-keep-screen hook' "$SETTINGS")" -eq 1
+check "install: /close skill linked into ~/.claude/skills" test -f "$HOME/.claude/skills/close/SKILL.md"
 
 # -- 2. the sandbox tmux server ---------------------------------------------------------
 tmx new-session -d -s test -x 200 -y 50 -c "$S" "bash --norc --noprofile"
@@ -243,8 +247,60 @@ for l in open(sys.argv[1]):
     k = list(json.loads(l))[:2]
     assert k == ["ts", "dt"], k' "$HOME/opt/claude-close-keep-screen/logs/close.jsonl"
 
+# -- 4b. self and /close: a Claude session closes itself ----------------------------------------
+SCREENS="$HOME/opt/claude-close-keep-screen/data/close-screens"
+CLOSE_LOG="$HOME/opt/claude-close-keep-screen/logs/close.jsonl"
+printf '%s\n' '#!/bin/sh' "echo '{\"prompt\":\"/close\"}' | \"$AAC\" hook" > "$S/hook_close.sh"
+wait_has() { local i; for i in $(seq 50); do has "$1" "$2" 2>/dev/null && return 0; sleep 0.1; done; return 1; }   # a fake's --exec-out is written after its sessions file
+wait_dead() { local i; for i in $(seq "${2:-60}"); do dead "$1" && return 0; sleep 0.1; done; return 1; }
+
+echo '{"prompt":"hello /close"}' | "$AAC" hook > "$O" 2>&1; RC=$?
+check "hook: any other prompt passes (exit 0, no output)" test $RC -eq 0 -a ! -s "$O"
+echo 'not json' | "$AAC" hook > "$O" 2>&1; RC=$?
+check "hook: unreadable input passes" test $RC -eq 0 -a ! -s "$O"
+bash "$S/hook_close.sh" > "$O" 2>&1
+check "hook: /close outside a Claude session is blocked with the reason" has "$O" '"decision": "block", "reason": "claude-close-keep-screen: not closed: not running inside a Claude session'
+run "$O" self
+check "self outside a Claude session: refused" test $RC -eq 1
+
+# ! form: an idle session runs `claude-close-keep-screen self`
+U_S1=$(uuid_of 51); write_transcript "$U_S1" 1; start_fake "$U_S1" idle --exec-after "'$AAC self'" --exec-out "$S/s1.txt"; PANE_S1=$FAKE_PANE; P_S1=$(pid_of "$U_S1")
+check "self: returns at once, saying it closes" wait_has "$S/s1.txt" "Closing this Claude session"
+check "self: closed (ended by SIGTERM)" bash -c "for i in \$(seq 60); do grep -qF 'SIGTERM $P_S1' '$TERM_LOG' && exit 0; sleep 0.1; done; exit 1"
+wait_dead "$P_S1"; sleep 0.5
+tmx capture-pane -p -S - -t "$PANE_S1" > "$S/pane.txt"
+check "self: screen file has the captured screen" has "$SCREENS/$U_S1.txt" "FAKE-CLAUDE-SCREEN $U_S1"
+check "self: screen file has the summary box" has "$SCREENS/$U_S1.txt" "Claude session closed at"
+check "self: the box shows the last prompt" has "$SCREENS/$U_S1.txt" "ago: the last prompt"
+check "self: pane shows the screen and the box" bash -c "grep -qF 'FAKE-CLAUDE-SCREEN $U_S1' '$S/pane.txt' && grep -qF 'Press Enter to resume' '$S/pane.txt'"
+check "self: 'claude --resume <uuid>' pre-typed, not run" test "$(grep -v '^ *$' "$S/pane.txt" | tail -1)" = "\$ claude --resume $U_S1"
+check "self: logged" has "$CLOSE_LOG" "\"event\": \"close\", \"by\": \"self\", \"uuid\": \"$U_S1\""
+
+# /close through the hook, in a session busy for 2 s more (the prompt being handled): the helper waits for idle
+U_S2=$(uuid_of 52); start_fake "$U_S2" busy --idle-after 2 --exec-after "'sh $S/hook_close.sh'" --exec-out "$S/s2.txt"; P_S2=$(pid_of "$U_S2")
+check "hook /close: blocked (never reaches the model), saying it closes" bash -c "for i in \$(seq 50); do grep -qF 'Closing this Claude session' '$S/s2.txt' 2>/dev/null && break; sleep 0.1; done; grep -qF '\"decision\": \"block\"' '$S/s2.txt'"
+sleep 1
+check "hook /close: not closed while busy" alive "$P_S2"
+wait_dead "$P_S2" 80; sleep 0.5
+check "hook /close: closed once idle" has "$TERM_LOG" "SIGTERM $P_S2"
+check "hook /close: screen file with the box" has "$SCREENS/$U_S2.txt" "Press Enter to resume"
+
+# still busy after the wait: left alone
+U_S3=$(uuid_of 53); start_fake "$U_S3" busy --exec-after "'CLAUDE_CLOSE_KEEP_SCREEN_SELF_WAIT_S=1 $AAC self'" --exec-out "$S/s3.txt"; P_S3=$(pid_of "$U_S3")
+sleep 3.5
+check "self, still busy after the wait: not closed" alive "$P_S3"
+check "self, still busy after the wait: logged as refused" has "$CLOSE_LOG" "\"by\": \"self\", \"uuid\": \"$U_S3\", \"pid\": $P_S3, \"reason\": \"still busy"
+
+# no tmux pane: refused before anything starts
+U_S4=$(uuid_of 54)
+( cd "$S" && exec python3 "$FAKE" --uuid "$U_S4" --status idle --term-file "$TERM_LOG" --exec-after "$AAC self" --exec-out "$S/s4.txt" > /dev/null < /dev/null ) &
+L_STARTED+=("$!"); P_S4=$!; wait_for_session "$U_S4"
+check "self with no tmux pane: refused" wait_has "$S/s4.txt" "not in a tmux pane"
+check "self with no tmux pane: still running" alive "$P_S4"
+check "self: no SIGTERM to the sessions it refused" bash -c "! grep -qE 'SIGTERM ($P_S3|$P_S4)\$' '$TERM_LOG'"
+
 # -- 5. idle --over <hours> -------------------------------------------------------------------
-for p in "$P_BUSY" "$P_SELF" "$P_ANC" "$P_NOTMUX" "$P_KIND" "$P_GONEPANE" "$P_WRONGPANE" "$(pid_of "$U_AMB1")" "$(pid_of "$U_AMB2")"; do stop_fake "$p"; done
+for p in "$P_BUSY" "$P_SELF" "$P_ANC" "$P_NOTMUX" "$P_KIND" "$P_GONEPANE" "$P_WRONGPANE" "$(pid_of "$U_AMB1")" "$(pid_of "$U_AMB2")" "$P_S3" "$P_S4"; do stop_fake "$p"; done
 mkdir -p "$S/set-aside"   # files moved out of the way (never deleted: the sandbox is kept for reading)
 mv "$CLAUDE_CONFIG_DIR/sessions/stale.json" "$CLAUDE_CONFIG_DIR/sessions/reuse.json" "$CLAUDE_CONFIG_DIR/sessions/$P_STUCK.json" "$S/set-aside/"
 : > "$TERM_LOG"
@@ -295,6 +351,8 @@ mv "$S/bin/agent-tracker" "$S/set-aside/"
 bash "$HOME/opt/claude-close-keep-screen/uninstall.sh" >> "$LOG" 2>&1; check "uninstall exits 0" test $? -eq 0
 check "uninstall: link removed" test ! -e "$AAC" -a ! -L "$AAC"
 check "uninstall: deployed copy removed" test ! -e "$HOME/opt/claude-close-keep-screen/bin/claude-close-keep-screen"
+check "uninstall: the /close hook removed from settings.json" bash -c "! grep -q 'claude-close-keep-screen hook' '$SETTINGS'"
+check "uninstall: /close skill link removed" test ! -e "$HOME/.claude/skills/close" -a ! -L "$HOME/.claude/skills/close"
 check "uninstall: screen files and log kept" test -s "$HOME/opt/claude-close-keep-screen/logs/close.jsonl" -a -d "$HOME/opt/claude-close-keep-screen/data/close-screens"
 
 echo "claude-close-keep-screen tests: $PASS passed, $FAIL failed (log: $LOG)"
