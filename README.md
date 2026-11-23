@@ -69,7 +69,7 @@ safety checks ──► capture the pane ──► SIGTERM ──► screen file
      $ claude --resume 1b64d774-2f14-4387-8aba-a11553e6cd1f
 ```
 
-**Scheduler: none yet.** When `idle` should run (every hour? at night? which N?) is not decided; for now it runs by hand.
+**Scheduler: none** (the user, 2026-11-23): `idle` runs by hand only.
 
 ## Folder map
 

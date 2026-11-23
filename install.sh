@@ -8,7 +8,7 @@
 #   ~/.claude/settings.json, hooks.UserPromptSubmit      our one group, `claude-close-keep-screen hook` (src/merge_claude_hooks.py):
 #                                                        it turns the prompt /close into `claude-close-keep-screen self`
 #
-# No scheduler is installed: when `claude-close-keep-screen idle` runs is not decided yet (README.md).
+# No scheduler: `claude-close-keep-screen idle` runs by hand only (the user, 2026-11-23).
 # Idempotent: safe to re-run at any time. Usage: bash install.sh
 set -euo pipefail
 

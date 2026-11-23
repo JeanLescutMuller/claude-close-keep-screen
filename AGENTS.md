@@ -12,7 +12,7 @@ Development home: NAS (`~/dev/agents/claude-close-keep-screen` on the NAS, since
 - **The hook runs on every prompt of every Claude session**: anything but `/close` returns at once with no output (about 0.08 s), and an error never blocks a prompt. `/close` needs the skill `skills/close` (without it Claude Code answers "Unknown command" before any hook runs, tested 2026-11-23); the skill has `disable-model-invocation: true`, so the model never closes its own session.
 - **SIGTERM only, never SIGKILL**: Claude Code flushes its transcript on SIGTERM. If it has not exited after 5 s, leave the pane untouched and exit 1.
 - **The pid, status and kind come only from `$CLAUDE_CONFIG_DIR/sessions/<pid>.json`.** `agent-tracker now --json` (when on the PATH) only adds the last prompt, the pane and the transcript path.
-- **No scheduler**: when `idle` runs is not decided (the user, 2026-11-07). Do not add a trigger without the user; when one is added, follow skill `jobs-and-services`.
+- **No scheduler**: `idle` runs by hand only (the user, 2026-11-07, confirmed 2026-11-23: "No schedule for idle"). Never add a trigger unless the user asks; then follow skill `jobs-and-services`.
 - `close` is a faithful port of `asm close` (agent-session-manager `src/asm` v4.7, lines 1538-1750): keep its behavior unless the user changes it.
 
 ## Commands
